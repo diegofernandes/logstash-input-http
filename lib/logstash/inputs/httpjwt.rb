@@ -7,6 +7,7 @@ require "puma/server"
 require "puma/minissl"
 require "base64"
 require "rack"
+require "logstash/util/http_jwt_token"
 
 class Puma::Server
   # ensure this method doesn't mess up our vanilla request
@@ -15,7 +16,7 @@ end
 
 # Using this input you can receive single or multiline events over http(s).
 # Applications can send a HTTP POST request with a body to the endpoint started by this
-# input and Logstash will convert it into an event for subsequent processing. Users 
+# input and Logstash will convert it into an event for subsequent processing. Users
 # can pass plain text, JSON, or any formatted data and use a corresponding codec with this
 # input. For Content-Type `application/json` the `json` codec is used, but for all other
 # data formats, `plain` codec is used.
@@ -23,20 +24,20 @@ end
 # This input can also be used to receive webhook requests to integrate with other services
 # and applications. By taking advantage of the vast plugin ecosystem available in Logstash
 # you can trigger actionable events right from your application.
-# 
+#
 # ==== Security
 # This plugin supports standard HTTP basic authentication headers to identify the requester.
 # You can pass in an username, password combination while sending data to this input
 #
-# You can also setup SSL and send data securely over https, with an option of validating 
-# the client's certificate. Currently, the certificate setup is through 
-# https://docs.oracle.com/cd/E19509-01/820-3503/ggfen/index.html[Java Keystore 
+# You can also setup SSL and send data securely over https, with an option of validating
+# the client's certificate. Currently, the certificate setup is through
+# https://docs.oracle.com/cd/E19509-01/820-3503/ggfen/index.html[Java Keystore
 # format]
 #
-class LogStash::Inputs::Http < LogStash::Inputs::Base
+class LogStash::Inputs::HttpJWT < LogStash::Inputs::Base
   #TODO: config :cacert, :validate => :path
 
-  config_name "http"
+  config_name "httpjwt"
 
   # Codec used to decode the incoming data.
   # This codec will be used as a fall-back if the content-type
@@ -80,9 +81,12 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
   # specify a custom set of response headers
   config :response_headers, :validate => :hash, :default => { 'Content-Type' => 'text/plain' }
 
+  # JWT secret
+  config :secret, :validate => :string, :required => false
+
   # useless headers puma adds to the requests
   # mostly due to rack compliance
-  REJECTED_HEADERS = ["puma.socket", "rack.hijack?", "rack.hijack", "rack.url_scheme", "rack.after_reply", "rack.version", "rack.errors", "rack.multithread", "rack.multiprocess", "rack.run_once", "SCRIPT_NAME", "QUERY_STRING", "SERVER_PROTOCOL", "SERVER_SOFTWARE", "GATEWAY_INTERFACE"]
+  REJECTED_HEADERS = ["REQUEST_PATH", "REQUEST_URI", "HTTP_AUTHORIZATION", "puma.socket", "rack.hijack?", "rack.hijack", "rack.url_scheme", "rack.after_reply", "rack.version", "rack.errors", "rack.multithread", "rack.multiprocess", "rack.run_once", "SCRIPT_NAME", "QUERY_STRING", "SERVER_PROTOCOL", "SERVER_SOFTWARE", "GATEWAY_INTERFACE"]
 
   public
   def register
@@ -131,7 +135,7 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
         body = req.delete("rack.input")
         @codecs.fetch(req["content_type"], @codec).decode(body.read) do |event|
           event["host"] = remote_host
-          event["headers"] = req
+          event["@metadata"] = req["metadata"]
           decorate(event)
           queue << event
         end
@@ -146,8 +150,12 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
       username == @user && password == @password.value
     end if (@user && @password)
 
+    secret = @secret
+    logger = @logger
+
     @server.app = Rack::Builder.new do
       use(Rack::Auth::Basic, &auth) if auth
+      use(JwtToken, :secret => secret, :logger => logger) if secret
       use CompressedRequests
       run(p)
     end
@@ -172,4 +180,4 @@ class LogStash::Inputs::Http < LogStash::Inputs::Base
     # do nothing
   end
 
-end # class LogStash::Inputs::Http
+end # class LogStash::Inputs::HttpJWT

@@ -1,12 +1,12 @@
 require "logstash/devutils/rspec/spec_helper"
-require "logstash/inputs/http"
+require "logstash/inputs/httpjwt"
 require "json"
 require "ftw"
 require "stud/temporary"
 require "zlib"
 require "stringio"
 
-describe LogStash::Inputs::Http do
+describe LogStash::Inputs::HttpJWT do
 
   before do
     srand(RSpec.configuration.seed)
@@ -15,6 +15,7 @@ describe LogStash::Inputs::Http do
   let(:agent) { FTW::Agent.new }
   let(:queue) { Queue.new }
   let(:port) { rand(5000) + 1025 }
+
 
   it_behaves_like "an interruptible input plugin" do
     let(:config) { { "port" => port } }
@@ -25,7 +26,7 @@ describe LogStash::Inputs::Http do
   end
 
   describe "request handling" do
-    subject { LogStash::Inputs::Http.new }
+    subject { LogStash::Inputs::HttpJWT.new }
     before :each do
       subject.register
       t = Thread.new { subject.run(queue) }
@@ -41,7 +42,7 @@ describe LogStash::Inputs::Http do
     end
 
     context "with default codec" do
-      subject { LogStash::Inputs::Http.new("port" => port) }
+      subject { LogStash::Inputs::HttpJWT.new("port" => port) }
       context "when receiving a text/plain request" do
         it "should process the request normally" do
           agent.post!("http://localhost:#{port}/meh.json",
@@ -111,7 +112,7 @@ describe LogStash::Inputs::Http do
       end
     end
     context "with json codec" do
-      subject { LogStash::Inputs::Http.new("port" => port, "codec" => "json") }
+      subject { LogStash::Inputs::HttpJWT.new("port" => port, "codec" => "json") }
       it "should parse the json body" do
         agent.post!("http://localhost:#{port}/meh.json", :body => { "message" => "Hello" }.to_json)
         event = queue.pop
@@ -120,7 +121,7 @@ describe LogStash::Inputs::Http do
     end
 
     context "when using a custom codec mapping" do
-      subject { LogStash::Inputs::Http.new("port" => port,
+      subject { LogStash::Inputs::HttpJWT.new("port" => port,
                                            "additional_codecs" => { "application/json" => "plain" }) }
       it "should decode the message accordingly" do
         body = { "message" => "Hello" }.to_json
@@ -134,7 +135,7 @@ describe LogStash::Inputs::Http do
 
     context "when using custom headers" do
       let(:custom_headers) { { 'access-control-allow-origin' => '*' } }
-      subject { LogStash::Inputs::Http.new("port" => port, "response_headers" => custom_headers) }
+      subject { LogStash::Inputs::HttpJWT.new("port" => port, "response_headers" => custom_headers) }
 
       describe "the response" do
         it "should include the custom headers" do
@@ -145,7 +146,7 @@ describe LogStash::Inputs::Http do
     end
     describe "basic auth" do
       user = "test"; password = "pwd"
-      subject { LogStash::Inputs::Http.new("port" => port, "user" => user, "password" => password) }
+      subject { LogStash::Inputs::HttpJWT.new("port" => port, "user" => user, "password" => password) }
       let(:auth_token) { Base64.strict_encode64("#{user}:#{password}") }
       context "when client doesn't present auth token" do
         let!(:response) { agent.post!("http://localhost:#{port}/meh", :body => "hi") }
@@ -174,7 +175,7 @@ describe LogStash::Inputs::Http do
       end
       context "when client presents correct auth token" do
         let!(:response) do
-          agent.post!("http://localhost:#{port}/meh",
+          agent.post!("http://localhost:#{port}/",
                       :headers => {
                         "content-type" => "text/plain",
                         "authorization" => "Basic #{auth_token}"
@@ -188,25 +189,85 @@ describe LogStash::Inputs::Http do
         end
       end
     end
+    describe "jwt auth" do
+      secret = "test";
+      payload = {:data => 'test'}
+      subject { LogStash::Inputs::HttpJWT.new("port" => port, "secret" => secret) }
+      let(:auth_token) { JWT.encode payload, secret }
 
+      context "when client doesn't present auth token" do
+        let!(:response) { agent.post!("http://localhost:#{port}/meh", :body => "hi") }
+        it "should respond with 401" do
+          expect(response.status).to eq(401)
+        end
+        it "should not generate an event" do
+          expect(queue).to be_empty
+        end
+      end
+      context "when client presents incorrect auth token" do
+        let!(:response) do
+          agent.post!("http://localhost:#{port}/meh",
+                      :headers => {
+                        "content-type" => "text/plain",
+                        "authorization" => "Bearer meh"
+                      },
+                      :body => "hi")
+        end
+        it "should respond with 401" do
+          expect(response.status).to eq(401)
+        end
+        it "should not generate an event" do
+          expect(queue).to be_empty
+        end
+      end
+      context "when client presents correct auth token" do
+        let!(:response) do
+          agent.post!("http://localhost:#{port}/",
+                      :headers => {
+                        "content-type" => "application/json",
+                        "authorization" => "Bearer #{auth_token}"
+                      }, :body => "hi")
+        end
+        it "should respond with 200" do
+          expect(response.status).to eq(200)
+        end
+        it "should generate an event" do
+          expect(queue).to_not be_empty
+        end
+      end
+      context "when client presents correct auth token url" do
+        let!(:response) do
+          agent.post!("http://localhost:#{port}/#{auth_token}",
+                      :headers => {
+                        "content-type" => "application/json"
+                      }, :body => "hi")
+        end
+        it "should respond with 200" do
+          expect(response.status).to eq(200)
+        end
+        it "should generate an event" do
+          expect(queue).to_not be_empty
+        end
+      end
+    end
   end
 
   context "with :ssl => false" do
-    subject { LogStash::Inputs::Http.new("port" => port, "ssl" => false) }
+    subject { LogStash::Inputs::HttpJWT.new("port" => port, "ssl" => false) }
     it "should not raise exception" do
       expect { subject.register }.to_not raise_exception
     end
   end
   context "with :ssl => true" do
     context "without :keystore and :keystore_password" do
-      subject { LogStash::Inputs::Http.new("port" => port, "ssl" => true) }
+      subject { LogStash::Inputs::HttpJWT.new("port" => port, "ssl" => true) }
       it "should raise exception" do
         expect { subject.register }.to raise_exception(LogStash::ConfigurationError)
       end
     end
     context "with :keystore and :keystore_password" do
       let(:keystore) { Stud::Temporary.file }
-      subject { LogStash::Inputs::Http.new("port" => port, "ssl" => true,
+      subject { LogStash::Inputs::HttpJWT.new("port" => port, "ssl" => true,
                                            "keystore" => keystore.path,
                                            "keystore_password" => "pass") }
       it "should not raise exception" do
